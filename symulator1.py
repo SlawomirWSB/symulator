@@ -12,7 +12,7 @@ st.set_page_config(page_title="Autonomiczny Bot SPOT", layout="wide", page_icon=
 st.title("🤖 Dashboard: Autonomiczny Bot SPOT")
 st.markdown("---")
 
-# Inicjalizacja pamięci podręcznej
+# Inicjalizacja pamięci podręcznej Streamlita
 if 'wirtualne_usdt' not in st.session_state: st.session_state.wirtualne_usdt = 100.0
 if 'historia_zagran' not in st.session_state: st.session_state.historia_zagran = []
 if 'aktywna_pozycja' not in st.session_state: st.session_state.aktywna_pozycja = None
@@ -43,11 +43,16 @@ def oblicz_rsi(ceny_zamkniecia, okres=14):
     return 100 - (100 / (1 + rs))
 
 # =====================================================================
-# LOGIKA BOTA (Wykonuje JEDEN obrót przy każdym odświeżeniu strony)
+# LOGIKA BOTA (Wykonuje JEDEN pełen obieg rynku co 10 sekund)
 # =====================================================================
 def skanuj_rynek():
-    gielda = ccxt.binanceus()
-    WATCHLISTA = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT"]
+    gielda = ccxt.binanceus() # Bezpieczna wersja chmurowa (omija blokady USA)
+    
+    # ROZBUDOWANA WATCHLISTA DO MULTI-SKANOWANIA
+    WATCHLISTA = [
+        "BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", 
+        "ADA/USDT", "DOGE/USDT", "AVAX/USDT", "LINK/USDT"
+    ]
     wielkosc_pozycji_usd = 25.0
 
     try:
@@ -58,8 +63,10 @@ def skanuj_rynek():
                 cena = ceny[-1]
                 rsi = oblicz_rsi(ceny)
                 
+                # Zapis stanu do pamięci radaru
                 st.session_state.aktualny_skan[symbol] = {"cena": cena, "rsi": rsi}
                 
+                # Kryterium zakupu SPOT (RSI poniżej 35 = wyprzedanie)
                 if rsi < 35:
                     cena_tp = cena * 1.004
                     cena_sl = cena * 0.996
@@ -69,44 +76,52 @@ def skanuj_rynek():
                         'symbol': symbol, 'wejscie': cena,
                         'tp': cena_tp, 'sl': cena_sl, 'ilosc': ilosc
                     }
-                    dodaj_log(f"🚨 [SYGNAŁ] Wykryto okazję na {symbol}. Wirtualny zakup po {cena}.")
-                    break # Przerwij pętlę po zakupie
+                    dodaj_log(f"🚨 [SYGNAŁ] Wykryto wyprzedanie na {symbol}. Wirtualny zakup.")
+                    break 
+                time.sleep(0.2) # Mikro-przerwa między monetami dla ochrony API
 
         else:
             pos = st.session_state.aktywna_pozycja
             ticker = gielda.fetch_ticker(pos['symbol'])
             obecna_cena = ticker['last']
-            st.session_state.aktualny_skan[pos['symbol']]['cena'] = obecna_cena
+            
+            # Aktualizacja ceny na radarze podczas trwania pozycji
+            if pos['symbol'] in st.session_state.aktualny_skan:
+                st.session_state.aktualny_skan[pos['symbol']]['cena'] = obecna_cena
             
             if obecna_cena >= pos['tp']:
                 zysk = (pos['tp'] - pos['wejscie']) * pos['ilosc']
                 st.session_state.wirtualne_usdt += zysk
                 st.session_state.historia_zagran.insert(0, {
-                    "Data": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                    "Moneta": pos['symbol'], "Typ": "✅ TAKE PROFIT",
-                    "Wejście": round(pos['wejscie'], 4), "Wyjście": round(obecna_cena, 4),
-                    "Wynik": f"+{round(zysk, 2)} USD"
+                    "Data Zamknięcia": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    "Kryptowaluta": pos['symbol'].replace("/USDT", ""), 
+                    "Status": "✅ TAKE PROFIT",
+                    "Cena Wejścia": round(pos['wejscie'], 4), 
+                    "Cena Wyjścia": round(obecna_cena, 4),
+                    "Wynik USD": f"+{round(zysk, 2)}"
                 })
-                dodaj_log(f"🎉 Zakończono {pos['symbol']} z zyskiem: +{round(zysk, 2)} USD")
+                dodaj_log(f"🎉 Zamknięto {pos['symbol']} na poziomie Take Profit!")
                 st.session_state.aktywna_pozycja = None
 
             elif obecna_cena <= pos['sl']:
                 strata = (pos['wejscie'] - pos['sl']) * pos['ilosc']
                 st.session_state.wirtualne_usdt -= strata
                 st.session_state.historia_zagran.insert(0, {
-                    "Data": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                    "Moneta": pos['symbol'], "Typ": "❌ STOP LOSS",
-                    "Wejście": round(pos['wejscie'], 4), "Wyjście": round(obecna_cena, 4),
-                    "Wynik": f"-{round(strata, 2)} USD"
+                    "Data Zamknięcia": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    "Kryptowaluta": pos['symbol'].replace("/USDT", ""), 
+                    "Status": "❌ STOP LOSS",
+                    "Cena Wejścia": round(pos['wejscie'], 4), 
+                    "Cena Wyjścia": round(obecna_cena, 4),
+                    "Wynik USD": f"-{round(strata, 2)}"
                 })
-                dodaj_log(f"📉 Pozycja {pos['symbol']} zamknięta ze stratą: -{round(strata, 2)} USD")
+                dodaj_log(f"📉 Wybito Stop Loss dla pozycji {pos['symbol']}.")
                 st.session_state.aktywna_pozycja = None
 
     except Exception as e:
-        dodaj_log(f"⚠️ Chwilowy błąd sieci: {str(e)}")
+        dodaj_log(f"⚠️ Problem z pobraniem danych: {str(e)}")
 
 # =====================================================================
-# INTERFEJS BOCZNY (SIDEBAR)
+# PANEL STEROWANIA (SIDEBAR)
 # =====================================================================
 with st.sidebar:
     st.header("⚙️ Panel Sterowania")
@@ -114,77 +129,89 @@ with st.sidebar:
     if st.button("▶️ URUCHOM BOTA", type="primary", use_container_width=True):
         if st.session_state.status_bota != "Uruchomiony":
             st.session_state.status_bota = "Uruchomiony"
-            dodaj_log("Inicjalizacja silnika... Łączenie z Binance.")
+            dodaj_log("Uruchamiam silnik skanujący Bybit/BinanceUS...")
             st.rerun()
 
     if st.button("🛑 ZATRZYMAJ", use_container_width=True):
         st.session_state.status_bota = "Wyłączony"
-        dodaj_log("System zatrzymany przez użytkownika.")
+        dodaj_log("Bot został wyłączony przez użytkownika.")
         st.rerun()
         
     st.divider()
     status_kolor = "🟢" if st.session_state.status_bota == "Uruchomiony" else "🔴"
-    st.markdown(f"**Status:** {status_kolor} {st.session_state.status_bota}")
-    st.metric(label="💰 Kapitał (Wirtualny)", value=f"{round(st.session_state.wirtualne_usdt, 2)} USDT")
+    st.markdown(f"**Status bota:** {status_kolor} {st.session_state.status_bota}")
+    st.metric(label="💰 Kapitał Testowy", value=f"{round(st.session_state.wirtualne_usdt, 2)} USDT")
 
 # =====================================================================
 # GŁÓWNY INTERFEJS (DASHBOARD)
 # =====================================================================
-kol_radar, kol_pozycja = st.columns([1.5, 1])
+kol_radar, kol_pozycja = st.columns([1.6, 1])
 
 with kol_radar:
-    st.subheader("📡 Radar Rynkowy (Na Żywo)")
+    st.subheader("📡 Wielopoziomowy Radar Cyfrowy")
     if st.session_state.status_bota == "Uruchomiony" and len(st.session_state.aktualny_skan) == 0:
-        st.info("🔄 Pobieranie danych z Binance...")
+        st.info("🔄 Buduję mapę rynku rynkowego... Poczekaj ok. 10 sekund.")
     elif len(st.session_state.aktualny_skan) == 0:
-        st.info("Bot jest wyłączony. Uruchom go w panelu bocznym.")
+        st.info("Radar jest nieaktywny. Odpal bota w menu bocznym.")
     else:
-        cols = st.columns(4)
-        idx = 0
-        for symbol, dane in st.session_state.aktualny_skan.items():
-            with cols[idx % 4]:
+        # Dynamiczne budowanie siatki rzędów (po 4 kafelki w rzędzie)
+        lista_monet = list(st.session_state.aktualny_skan.keys())
+        for i in range(0, len(lista_monet), 4):
+            wiersz_cols = st.columns(4)
+            for j, symbol in enumerate(lista_monet[i:i+4]):
+                dane = st.session_state.aktualny_skan[symbol]
                 rsi_val = dane['rsi']
                 kolor_delty = "inverse" if rsi_val < 35 else "normal"
-                st.metric(
+                
+                wiersz_cols[j].metric(
                     label=symbol.replace("/USDT", ""), 
-                    value=f"{round(dane['cena'], 2)}", 
+                    value=f"{round(dane['cena'], 3)}", 
                     delta=f"RSI: {round(rsi_val, 1)}",
                     delta_color=kolor_delty
                 )
-            idx += 1
 
 with kol_pozycja:
-    st.subheader("💼 Aktywna Pozycja")
+    st.subheader("💼 Monitor Transakcji")
     pos = st.session_state.aktywna_pozycja
     if pos is None:
-        st.success("Brak otwartych pozycji. Kapitał bezpieczny.")
+        st.success("Wszystkie wirtualne fundusze zabezpieczone w portfelu (USDT).")
     else:
-        st.warning(f"**W trakcie: {pos['symbol']}**")
-        st.write(f"💵 Wejście: `{round(pos['wejscie'], 4)}`")
-        st.write(f"🎯 Target: `{round(pos['tp'], 4)}`")
-        st.write(f"🛡️ Stop: `{round(pos['sl'], 4)}`")
+        st.warning(f"🎰 **Pozycja na: {pos['symbol']}**")
+        st.write(f"• Zakupiono po: `{round(pos['wejscie'], 4)}`")
+        st.write(f"• Target Profit (TP): `{round(pos['tp'], 4)}`")
+        st.write(f"• Stop Loss (SL): `{round(pos['sl'], 4)}`")
 
 st.divider()
 
-kol_logi, kol_historia = st.columns([1, 2])
+kol_logi, kol_historia = st.columns([1, 1.8])
 
 with kol_logi:
-    st.subheader("📝 Dziennik Operacji")
+    st.subheader("📋 Konsola Systemowa")
     logi_tekst = "\n".join(st.session_state.logi)
-    st.text_area("Ostatnie zdarzenia", value=logi_tekst, height=250, disabled=True, label_visibility="collapsed")
+    st.text_area("Logi", value=logi_tekst, height=280, disabled=True, label_visibility="collapsed")
 
 with kol_historia:
-    st.subheader("📚 Historia Transakcji")
+    st.subheader("📝 Dziennik Zamkniętych Zagrań")
     if not st.session_state.historia_zagran:
-        st.info("Brak zamkniętych transakcji w tej sesji.")
+        st.info("Czekam na zamknięcie pierwszej transakcji algorytmicznej.")
     else:
         df = pd.DataFrame(st.session_state.historia_zagran)
         st.dataframe(df, use_container_width=True, hide_index=True)
+        
+        # --- FUNKCJA GENEROWANIA PLIKU EXCEL/CSV ---
+        csv_data = df.to_csv(index=False, sep=';').encode('utf-8')
+        st.download_button(
+            label="📥 Pobierz Dziennik Zagrań (.CSV dla Excela)",
+            data=csv_data,
+            file_name=f"dziennik_bota_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
 
 # =====================================================================
-# PĘTLA NIESKOŃCZONA DLA CHMURY STREAMLIT
+# PĘTLA PODTRZYMUJĄCA (Bezpieczne 10 sekund przerwy)
 # =====================================================================
 if st.session_state.status_bota == "Uruchomiony":
-    skanuj_rynek()  # Pobiera ceny i przelicza wskaźniki
-    time.sleep(3)   # Odpoczywa 3 sekundy
-    st.rerun()      # Odświeża stronę od nowa
+    skanuj_rynek()
+    time.sleep(10) # 10 sekund odpoczynku – optymalna ochrona przed banem API
+    st.rerun()
