@@ -1,251 +1,87 @@
 import streamlit as st
-import ccxt
-import time
 import pandas as pd
-import pandas_ta as ta
-from datetime import datetime
+import requests
+import json
 
-# =====================================================================
-# KONFIGURACJA STRONY
-# =====================================================================
-st.set_page_config(page_title="Quant Bot SPOT V1", layout="wide", page_icon="🤖")
+# Ustawienia strony dopasowane pod telefon
+st.set_page_config(page_title="🤖 Panel Chmurowego Bota", layout="centered", initial_sidebar_state="collapsed")
 
-st.title("🤖 Quant Dashboard: Autonomiczny Bot SPOT")
-st.markdown("---")
+# USTAW TUTAJ SWOJE DANE Z GITHUBA, ŻEBY STREAMLIT WIEDZIAŁ SKĄD CZYTAĆ
+# Format URL: https://raw.githubusercontent.com/[TWÓJ_NICK]/[NAZWA_REPO]/main/stan_bota.json
+NICK_GITHUB = "TUTAJ_WPISZ_SWÓJ_NICK_Z_GITHUB"
+NAZWA_REPOZYTORIUM = "TUTAJ_WPISZ_NAZWĘ_REPA"
 
-# Inicjalizacja pamięci podręcznej (Session State)
-if 'wirtualne_usdt' not in st.session_state: st.session_state.wirtualne_usdt = 100.0
-if 'historia_zagran' not in st.session_state: st.session_state.historia_zagran = []
-if 'aktywna_pozycja' not in st.session_state: st.session_state.aktywna_pozycja = None
-if 'status_bota' not in st.session_state: st.session_state.status_bota = "Wyłączony"
-if 'logi' not in st.session_state: st.session_state.logi = ["System gotowy do pracy."]
-if 'aktualny_skan' not in st.session_state: st.session_state.aktualny_skan = {}
+URL_STANU = f"https://raw.githubusercontent.com/{NICK_GITHUB}/{NAZWA_REPOZYTORIUM}/main/stan_bota.json"
 
-def dodaj_log(tekst):
-    teraz = datetime.now().strftime("%H:%M:%S")
-    st.session_state.logi.insert(0, f"[{teraz}] {tekst}") 
-    if len(st.session_state.logi) > 20: st.session_state.logi.pop()
+st.title("🤖 Mobilny Monitor Bota")
+st.caption("Dane odświeżają się automatycznie w tle na serwerach GitHub Actions co 10 minut.")
 
-# =====================================================================
-# LOGIKA ZAAWANSOWANEGO SKANERA
-# =====================================================================
-def skanuj_rynek():
-    # Używamy Binance US, aby ominąć geoblokady chmury Streamlit (dla USA)
-    gielda = ccxt.binanceus()
-    
-    # PEŁNA LISTA 10 KRYPTOWALUT
-    WATCHLISTA = [
-        "BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "ADA/USDT", 
-        "DOGE/USDT", "AVAX/USDT", "LINK/USDT", "DOT/USDT", "LTC/USDT"
-    ]
-    wielkosc_pozycji_usd = 25.0
-
+@st.cache_data(ttl=60) # Cache na 1 minutę, żeby nie bombardować GitHuba przy odświeżaniu strony
+def pobierz_stan_z_chmury():
     try:
-        # PRZYPADEK 1: BRAK POZYCJI -> SZUKAMY ZŁOTEGO SYGNAŁU
-        if st.session_state.aktywna_pozycja is None:
-            for symbol in WATCHLISTA:
-                # Pobieramy 100 świec dla precyzyjnego obliczenia EMA i MACD
-                swiece = gielda.fetch_ohlcv(symbol, timeframe="5m", limit=100)
-                
-                df = pd.DataFrame(swiece, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-                
-                # 🚀 OBLICZANIE WSKAŹNIKÓW (pandas_ta)
-                df.ta.ema(length=9, append=True)
-                df.ta.macd(fast=12, slow=26, signal=9, append=True)
-                df.ta.rsi(length=14, append=True)
-                df.ta.atr(length=14, append=True)
-                df['v_avg'] = df['volume'].rolling(20).mean() # Średni wolumen
-                
-                # Zabezpieczenie przed brakami na początku kalkulacji
-                if df.isna().iloc[-1].any():
-                    continue
-
-                # OSTATNIE WARTOŚCI
-                cena = df['close'].iloc[-1]
-                rsi = df['RSI_14'].iloc[-1]
-                ema9 = df['EMA_9'].iloc[-1]
-                macd_h = df['MACDh_12_26_9'].iloc[-1]
-                macd_h_prev = df['MACDh_12_26_9'].iloc[-2]
-                vol = df['volume'].iloc[-1]
-                v_avg = df['v_avg'].iloc[-1]
-                atr = df['ATRr_14'].iloc[-1]
-                
-                # Zapis do radaru (dla wizualizacji)
-                st.session_state.aktualny_skan[symbol] = {
-                    "cena": cena, "rsi": rsi, "ema_przebita": cena > ema9
-                }
-                
-                # 🛡️ ZŁOTY WARUNEK WEJŚCIA
-                warunek_tani = rsi < 45  
-                warunek_odbicia = cena > ema9  
-                warunek_momentum = macd_h > macd_h_prev  
-                warunek_wolumenu = vol > v_avg  
-                
-                if warunek_tani and warunek_odbicia and warunek_momentum and warunek_wolumenu:
-                    odleglosc_atr = atr * 1.5  # SL jest oddalony o 1.5-krotność obecnej zmienności ATR
-                    poczatkowy_sl = cena - odleglosc_atr
-                    cena_tp = cena * 1.015  # Twardy cel (+1.5%)
-                    ilosc = wielkosc_pozycji_usd / cena
-                    
-                    st.session_state.aktywna_pozycja = {
-                        'symbol': symbol, 
-                        'wejscie': cena,
-                        'najwyzsza_cena': cena, 
-                        'tp': cena_tp, 
-                        'aktualny_sl': poczatkowy_sl, 
-                        'odleglosc_tsl': odleglosc_atr, 
-                        'ilosc': ilosc
-                    }
-                    dodaj_log(f"🚨 [ZŁOTY SYGNAŁ] Wykryto bezpieczne odbicie na {symbol}! RSI: {round(rsi,1)}")
-                    break 
-                time.sleep(0.2)
-
-        # PRZYPADEK 2: POZYCJA OTWARTA -> ŚLEDZIMY ATR TRAILING SL
+        response = requests.get(URL_STANU)
+        if response.status_code == 200:
+            return response.json()
         else:
-            pos = st.session_state.aktywna_pozycja
-            ticker = gielda.fetch_ticker(pos['symbol'])
-            obecna_cena = ticker['last']
-            
-            if pos['symbol'] in st.session_state.aktualny_skan:
-                st.session_state.aktualny_skan[pos['symbol']]['cena'] = obecna_cena
+            return None
+    except:
+        return None
 
-            # --- RUCHOMY ATR STOP LOSS ---
-            if obecna_cena > pos['najwyzsza_cena']:
-                pos['najwyzsza_cena'] = obecna_cena
-                nowy_sl = obecna_cena - pos['odleglosc_tsl']
-                if nowy_sl > pos['aktualny_sl']:
-                    pos['aktualny_sl'] = nowy_sl
-            
-            # --- EGZEKUCJA ZAMKNIĘCIA ---
-            # 1. Awaryjny Take Profit (Wystrzał w górę)
-            if obecna_cena >= pos['tp']:
-                zysk = (pos['tp'] - pos['wejscie']) * pos['ilosc']
-                st.session_state.wirtualne_usdt += zysk
-                st.session_state.historia_zagran.insert(0, {
-                    "Data": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                    "Moneta": pos['symbol'].replace("/USDT", ""), "Status": "🚀 TWARDY TP",
-                    "Wejście": round(pos['wejscie'], 4), "Wyjście": round(obecna_cena, 4),
-                    "Wynik USD": f"+{round(zysk, 2)}"
-                })
-                dodaj_log(f"🎉 Zamknięto {pos['symbol']} na Twardym Take Profit (+1.5%)!")
-                st.session_state.aktywna_pozycja = None
+stan = pobierz_stan_z_chmury()
 
-            # 2. Wybicie na Trailing Stop Loss
-            elif obecna_cena <= pos['aktualny_sl']:
-                wynik_netto = (pos['aktualny_sl'] - pos['wejscie']) * pos['ilosc']
-                st.session_state.wirtualne_usdt += wynik_netto
-                
-                status_txt = "✅ ZYSKOWNY ATR-SL" if wynik_netto > 0 else "❌ STRATNY ATR-SL"
-                znak = "+" if wynik_netto > 0 else ""
-                
-                st.session_state.historia_zagran.insert(0, {
-                    "Data": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                    "Moneta": pos['symbol'].replace("/USDT", ""), "Status": status_txt,
-                    "Wejście": round(pos['wejscie'], 4), "Wyjście": round(pos['aktualny_sl'], 4),
-                    "Wynik USD": f"{znak}{round(wynik_netto, 2)}"
-                })
-                dodaj_log(f"🛡️ Zamek ATR wyzwolony dla {pos['symbol']}. Wynik: {znak}{round(wynik_netto, 2)} USD.")
-                st.session_state.aktywna_pozycja = None
+if stan is None:
+    st.error("❌ Nie udało się pobrać danych z GitHuba. Sprawdź czy poprawnie wpisałeś swój Nick i Nazwę repozytorium w pliku `streamlit_app.py` oraz czy plik `stan_bota.json` już powstał.")
+else:
+    # 1. GŁÓWNE STATYSTYKI (KAFELKI)
+    saldo = stan.get("wirtualne_usdt", 100.0)
+    zysk_procent = ((saldo - 100.0) / 100.0) * 100
 
-    except Exception as e:
-        dodaj_log(f"⚠️ Chwilowy błąd sieci, ponawiam analizę...")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric(label="Wirtualne Saldo", value=f"{round(saldo, 2)} USDT")
+    with col2:
+        st.metric(label="Całkowity Wynik", value=f"{round(zysk_procent, 2)}%", delta=f"{round(saldo-100.0, 2)} USD")
 
-# =====================================================================
-# INTERFEJS
-# =====================================================================
-with st.sidebar:
-    st.header("⚙️ Panel Sterowania")
-    
-    if st.button("▶️ URUCHOM BOTA", type="primary", use_container_width=True):
-        if st.session_state.status_bota != "Uruchomiony":
-            st.session_state.status_bota = "Uruchomiony"
-            dodaj_log("Uruchamiam silnik Quant. Inicjalizacja EMA/MACD/ATR...")
-            st.rerun()
+    st.markdown("---")
 
-    if st.button("🛑 ZATRZYMAJ", use_container_width=True):
-        st.session_state.status_bota = "Wyłączony"
-        dodaj_log("System zatrzymany.")
-        st.rerun()
-        
-    st.divider()
-    status_kolor = "🟢" if st.session_state.status_bota == "Uruchomiony" else "🔴"
-    st.markdown(f"**Status:** {status_kolor} {st.session_state.status_bota}")
-    st.metric(label="💰 Kapitał (USDT)", value=f"{round(st.session_state.wirtualne_usdt, 2)}")
+    # 2. SEKCJA AKTYWNEJ POZYCJI
+    st.subheader("📈 Status Aktywnej Pozycji")
+    pozycja = stan.get("aktywna_pozycja")
 
-kol_radar, kol_pozycja = st.columns([1.8, 1])
-
-with kol_radar:
-    st.subheader("📡 Radar Algorytmiczny (5m)")
-    if st.session_state.status_bota == "Uruchomiony" and len(st.session_state.aktualny_skan) == 0:
-        st.info("🔄 Przeliczam dane historyczne dla 10 rynków. To potrwa ok. 15 sekund...")
-    elif len(st.session_state.aktualny_skan) == 0:
-        st.info("Radar jest nieaktywny.")
+    if pozycja is None:
+        st.info("😴 Obecnie bot nie posiada otwartej pozycji. Skanuje rynek w poszukiwaniu sygnału...")
     else:
-        # PRAWIDŁOWY UKŁAD: 4 kolumny (żeby zapobiec ucinaniu liczb na BTC/ETH)
-        lista_monet = list(st.session_state.aktualny_skan.keys())
-        for i in range(0, len(lista_monet), 4):
-            wiersz_cols = st.columns(4)
-            for j, symbol in enumerate(lista_monet[i:i+4]):
-                dane = st.session_state.aktualny_skan[symbol]
-                
-                ema_znaczek = "✔️EMA" if dane['ema_przebita'] else "❌EMA"
-                kolor_delty = "inverse" if dane['rsi'] < 45 else "normal"
-                
-                # Zabezpieczenie przed długimi liczbami
-                cena = dane['cena']
-                cena_str = f"{int(cena)}" if cena > 1000 else f"{round(cena, 3)}"
-                
-                wiersz_cols[j].metric(
-                    label=symbol.replace("/USDT", ""), 
-                    value=cena_str, 
-                    delta=f"RSI:{round(dane['rsi'], 1)} {ema_znaczek}",
-                    delta_color=kolor_delty
-                )
-
-with kol_pozycja:
-    st.subheader("💼 Monitor Transakcji (ATR Trailing SL)")
-    pos = st.session_state.aktywna_pozycja
-    if pos is None:
-        st.success("Szukam Złotego Sygnału. Wymagane potwierdzenie EMA9, MACD i Wolumenu.")
-    else:
-        st.warning(f"🎰 **Pozycja otwarta: {pos['symbol']}**")
-        st.write(f"💵 Wejście po cenie: `{round(pos['wejscie'], 4)}`")
-        st.write(f"📈 Osiągnięty szczyt: `{round(pos['najwyzsza_cena'], 4)}`")
-        st.write(f"🛡️ **Obecny bufor obronny SL:** `{round(pos['aktualny_sl'], 4)}`")
+        st.success(f"🚨 **OTWARTA POZYCJA: {pozycja['symbol']}**")
         
-        zabezpieczony_wynik = (pos['aktualny_sl'] - pos['wejscie']) / pos['wejscie'] * 100
-        kolor_tekstu = "green" if zabezpieczony_wynik > 0 else "red"
-        st.markdown(f"Gwarantowany wynik po wbiciu SL: <span style='color:{kolor_tekstu}; font-weight:bold;'>{round(zabezpieczony_wynik, 2)}%</span>", unsafe_allow_html=True)
-
-st.divider()
-
-kol_logi, kol_historia = st.columns([1, 1.8])
-
-with kol_logi:
-    st.subheader("📋 Konsola Logów")
-    logi_tekst = "\n".join(st.session_state.logi)
-    st.text_area("Zdarzenia", value=logi_tekst, height=280, disabled=True, label_visibility="collapsed")
-
-with kol_historia:
-    st.subheader("📝 Dziennik Excel (Zabezpieczone Transakcje)")
-    if not st.session_state.historia_zagran:
-        st.info("Brak zamkniętych transakcji.")
-    else:
-        df = pd.DataFrame(st.session_state.historia_zagran)
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Cena Wejścia", f"{pozycja['wejscie']}")
+        c2.metric("Target Profit (TP)", f"{round(pozycja['tp'], 4)}")
+        c3.metric("Bieżący Stop Loss", f"{round(pozycja['aktualny_sl'], 4)}")
         
-        csv_data = df.to_csv(index=False, sep=';').encode('utf-8')
-        st.download_button(
-            label="📥 Pobierz CSV", data=csv_data,
-            file_name=f"forward_test_{datetime.now().strftime('%Y%m%d')}.csv",
-            mime="text/csv", use_container_width=True
+        # Pasek postępu podciągania stop lossa
+        st.caption(f"Najwyższa odnotowana cena od zakupu: {pozycja['najwyzsza_cena']}")
+
+    st.markdown("---")
+
+    # 3. HISTORIA TRANSAKCJI
+    st.subheader("📜 Dziennik Ostatnich Zagrań")
+    historia = stan.get("historia_zagran", [])
+
+    if not historia:
+        st.text("Brak zamkniętych transakcji w historii.")
+    else:
+        df_historia = pd.DataFrame(historia)
+        # Wyświetlamy jako ładną tabelę Streamlit
+        st.dataframe(
+            df_historia,
+            column_config={
+                "Wynik USD": st.column_config.TextColumn("Wynik Netto"),
+                "Status": st.column_config.TextColumn("Typ Wyjścia")
+            },
+            hide_index=True,
+            use_container_width=True
         )
 
-# =====================================================================
-# PĘTLA PODTRZYMUJĄCA
-# =====================================================================
-if st.session_state.status_bota == "Uruchomiony":
-    skanuj_rynek()
-    time.sleep(12) 
-    st.rerun()
+    # Przycisk do ręcznego odświeżenia widoku na telefonie
+    if st.button("🔄 Odśwież widok strony"):
+        st.rerun()
