@@ -46,7 +46,7 @@ def oblicz_rsi(ceny_zamkniecia, okres=14):
 # LOGIKA BOTA (Wykonuje JEDEN obrót przy każdym odświeżeniu strony)
 # =====================================================================
 def skanuj_rynek():
-    gielda = ccxt.binance()
+    gielda = ccxt.bybit()
     WATCHLISTA = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT"]
     wielkosc_pozycji_usd = 25.0
 
