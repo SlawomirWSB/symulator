@@ -2,7 +2,7 @@ import streamlit as st
 import ccxt
 import time
 import pandas as pd
-import pandas_ta as ta  # Potężna biblioteka z Twojego skanera XTB!
+import pandas_ta as ta
 from datetime import datetime
 
 # =====================================================================
@@ -13,6 +13,7 @@ st.set_page_config(page_title="Quant Bot SPOT V1", layout="wide", page_icon="�
 st.title("🤖 Quant Dashboard: Autonomiczny Bot SPOT")
 st.markdown("---")
 
+# Inicjalizacja pamięci podręcznej (Session State)
 if 'wirtualne_usdt' not in st.session_state: st.session_state.wirtualne_usdt = 100.0
 if 'historia_zagran' not in st.session_state: st.session_state.historia_zagran = []
 if 'aktywna_pozycja' not in st.session_state: st.session_state.aktywna_pozycja = None
@@ -29,9 +30,10 @@ def dodaj_log(tekst):
 # LOGIKA ZAAWANSOWANEGO SKANERA
 # =====================================================================
 def skanuj_rynek():
+    # Używamy Binance US, aby ominąć geoblokady chmury Streamlit (dla USA)
     gielda = ccxt.binanceus()
     
-    # PEŁNA LISTA 10 KRYPTOWALUT (Dodano DOT i LTC)
+    # PEŁNA LISTA 10 KRYPTOWALUT
     WATCHLISTA = [
         "BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "ADA/USDT", 
         "DOGE/USDT", "AVAX/USDT", "LINK/USDT", "DOT/USDT", "LTC/USDT"
@@ -39,12 +41,12 @@ def skanuj_rynek():
     wielkosc_pozycji_usd = 25.0
 
     try:
+        # PRZYPADEK 1: BRAK POZYCJI -> SZUKAMY ZŁOTEGO SYGNAŁU
         if st.session_state.aktywna_pozycja is None:
             for symbol in WATCHLISTA:
-                # Pobieramy 100 świec, żeby EMA i MACD miały z czego się precyzyjnie policzyć
+                # Pobieramy 100 świec dla precyzyjnego obliczenia EMA i MACD
                 swiece = gielda.fetch_ohlcv(symbol, timeframe="5m", limit=100)
                 
-                # Używamy Pandas, żeby wykorzystać pandas_ta
                 df = pd.DataFrame(swiece, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                 df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
                 
@@ -55,11 +57,11 @@ def skanuj_rynek():
                 df.ta.atr(length=14, append=True)
                 df['v_avg'] = df['volume'].rolling(20).mean() # Średni wolumen
                 
-                # Zabezpieczenie przed brakiem danych (pierwsze świece)
+                # Zabezpieczenie przed brakami na początku kalkulacji
                 if df.isna().iloc[-1].any():
                     continue
 
-                # OSTATNIE WARTOŚCI DO ANALIZY
+                # OSTATNIE WARTOŚCI
                 cena = df['close'].iloc[-1]
                 rsi = df['RSI_14'].iloc[-1]
                 ema9 = df['EMA_9'].iloc[-1]
@@ -69,22 +71,21 @@ def skanuj_rynek():
                 v_avg = df['v_avg'].iloc[-1]
                 atr = df['ATRr_14'].iloc[-1]
                 
-                # Zapis do radaru
+                # Zapis do radaru (dla wizualizacji)
                 st.session_state.aktualny_skan[symbol] = {
                     "cena": cena, "rsi": rsi, "ema_przebita": cena > ema9
                 }
                 
-                # 🛡️ ZŁOTY WARUNEK WEJŚCIA (Filtruje "spadające noże")
-                warunek_tani = rsi < 45  # Jest na tyle tanio, że warto się zainteresować
-                warunek_odbicia = cena > ema9  # Ale cena musi już zawracać (przebiła średnią)
-                warunek_momentum = macd_h > macd_h_prev  # Pęd sprzedających maleje
-                warunek_wolumenu = vol > v_avg  # Wzrost potwierdzony zwiększonym wolumenem
+                # 🛡️ ZŁOTY WARUNEK WEJŚCIA
+                warunek_tani = rsi < 45  
+                warunek_odbicia = cena > ema9  
+                warunek_momentum = macd_h > macd_h_prev  
+                warunek_wolumenu = vol > v_avg  
                 
                 if warunek_tani and warunek_odbicia and warunek_momentum and warunek_wolumenu:
-                    # OBLICZANIE BEZPIECZNEGO ATR TRAILING STOP LOSSA
-                    odleglosc_atr = atr * 1.5  # SL jest oddalony o 1.5-krotność obecnej rynkowej zmienności
+                    odleglosc_atr = atr * 1.5  # SL jest oddalony o 1.5-krotność obecnej zmienności ATR
                     poczatkowy_sl = cena - odleglosc_atr
-                    cena_tp = cena * 1.015  # Twardy, awaryjny cel u góry (+1.5%)
+                    cena_tp = cena * 1.015  # Twardy cel (+1.5%)
                     ilosc = wielkosc_pozycji_usd / cena
                     
                     st.session_state.aktywna_pozycja = {
@@ -93,13 +94,14 @@ def skanuj_rynek():
                         'najwyzsza_cena': cena, 
                         'tp': cena_tp, 
                         'aktualny_sl': poczatkowy_sl, 
-                        'odleglosc_tsl': odleglosc_atr, # Zapisujemy odległość w dolarach, a nie w procentach!
+                        'odleglosc_tsl': odleglosc_atr, 
                         'ilosc': ilosc
                     }
                     dodaj_log(f"🚨 [ZŁOTY SYGNAŁ] Wykryto bezpieczne odbicie na {symbol}! RSI: {round(rsi,1)}")
                     break 
                 time.sleep(0.2)
 
+        # PRZYPADEK 2: POZYCJA OTWARTA -> ŚLEDZIMY ATR TRAILING SL
         else:
             pos = st.session_state.aktywna_pozycja
             ticker = gielda.fetch_ticker(pos['symbol'])
@@ -111,11 +113,12 @@ def skanuj_rynek():
             # --- RUCHOMY ATR STOP LOSS ---
             if obecna_cena > pos['najwyzsza_cena']:
                 pos['najwyzsza_cena'] = obecna_cena
-                nowy_sl = obecna_cena - pos['odleglosc_tsl'] # SL podąża z zachowaniem bezpiecznego bufora ATR
+                nowy_sl = obecna_cena - pos['odleglosc_tsl']
                 if nowy_sl > pos['aktualny_sl']:
                     pos['aktualny_sl'] = nowy_sl
             
             # --- EGZEKUCJA ZAMKNIĘCIA ---
+            # 1. Awaryjny Take Profit (Wystrzał w górę)
             if obecna_cena >= pos['tp']:
                 zysk = (pos['tp'] - pos['wejscie']) * pos['ilosc']
                 st.session_state.wirtualne_usdt += zysk
@@ -128,6 +131,7 @@ def skanuj_rynek():
                 dodaj_log(f"🎉 Zamknięto {pos['symbol']} na Twardym Take Profit (+1.5%)!")
                 st.session_state.aktywna_pozycja = None
 
+            # 2. Wybicie na Trailing Stop Loss
             elif obecna_cena <= pos['aktualny_sl']:
                 wynik_netto = (pos['aktualny_sl'] - pos['wejscie']) * pos['ilosc']
                 st.session_state.wirtualne_usdt += wynik_netto
@@ -145,7 +149,7 @@ def skanuj_rynek():
                 st.session_state.aktywna_pozycja = None
 
     except Exception as e:
-        dodaj_log(f"⚠️ Czekam na ustabilizowanie wskaźników...")
+        dodaj_log(f"⚠️ Chwilowy błąd sieci, ponawiam analizę...")
 
 # =====================================================================
 # INTERFEJS
@@ -169,7 +173,7 @@ with st.sidebar:
     st.markdown(f"**Status:** {status_kolor} {st.session_state.status_bota}")
     st.metric(label="💰 Kapitał (USDT)", value=f"{round(st.session_state.wirtualne_usdt, 2)}")
 
-kol_radar, kol_pozycja = st.columns([1.6, 1])
+kol_radar, kol_pozycja = st.columns([1.8, 1])
 
 with kol_radar:
     st.subheader("📡 Radar Algorytmiczny (5m)")
@@ -178,21 +182,24 @@ with kol_radar:
     elif len(st.session_state.aktualny_skan) == 0:
         st.info("Radar jest nieaktywny.")
     else:
-        # Układ 2 rzędy po 5 elementów
+        # PRAWIDŁOWY UKŁAD: 4 kolumny (żeby zapobiec ucinaniu liczb na BTC/ETH)
         lista_monet = list(st.session_state.aktualny_skan.keys())
-        for i in range(0, len(lista_monet), 5):
-            wiersz_cols = st.columns(5)
-            for j, symbol in enumerate(lista_monet[i:i+5]):
+        for i in range(0, len(lista_monet), 4):
+            wiersz_cols = st.columns(4)
+            for j, symbol in enumerate(lista_monet[i:i+4]):
                 dane = st.session_state.aktualny_skan[symbol]
                 
-                # Znacznik przebicia EMA (Zielony znak ✔️ jeśli nad średnią)
-                ema_znaczek = "✔️ EMA" if dane['ema_przebita'] else "❌ EMA"
+                ema_znaczek = "✔️EMA" if dane['ema_przebita'] else "❌EMA"
                 kolor_delty = "inverse" if dane['rsi'] < 45 else "normal"
+                
+                # Zabezpieczenie przed długimi liczbami
+                cena = dane['cena']
+                cena_str = f"{int(cena)}" if cena > 1000 else f"{round(cena, 3)}"
                 
                 wiersz_cols[j].metric(
                     label=symbol.replace("/USDT", ""), 
-                    value=f"{round(dane['cena'], 3)}", 
-                    delta=f"RSI: {round(dane['rsi'], 1)} | {ema_znaczek}",
+                    value=cena_str, 
+                    delta=f"RSI:{round(dane['rsi'], 1)} {ema_znaczek}",
                     delta_color=kolor_delty
                 )
 
@@ -240,5 +247,5 @@ with kol_historia:
 # =====================================================================
 if st.session_state.status_bota == "Uruchomiony":
     skanuj_rynek()
-    time.sleep(12) # Zwiększono lekko czas, ponieważ bot pobiera teraz paczki po 100 świec dla 10 monet
+    time.sleep(12) 
     st.rerun()
